@@ -33,6 +33,29 @@ assert(out.qualityFlags.includes('HISTORICAL_STAGE1_FORMULA_NOT_YET_RECONCILED')
 assert(out.qualityFlags.includes('EXPERIMENTAL_MULTIPLIERS_ISOLATED_FROM_CANONICAL_MAP'));
 assert.strictEqual(out.stage1.experimentalProjectionLevels.length, 3);
 
+// Scenario-repriced gamma is optional and cannot rewrite the raw structural map.
+const scenarioRows = [
+  { strike: 7625, type: 'put', gamma: 0.015, openInterest: 4000, iv: 0.24, daysToExpiry: 7 },
+  { strike: 7650, type: 'call', gamma: 0.025, openInterest: 2000, iv: 0.22, daysToExpiry: 7 },
+  { strike: 7650, type: 'put', gamma: 0.030, openInterest: 2500, iv: 0.22, daysToExpiry: 7 },
+  { strike: 7675, type: 'call', gamma: 0.018, openInterest: 5000, iv: 0.24, daysToExpiry: 7 },
+];
+const scenarioOut = runEngine({
+  ...snapshot,
+  rows: scenarioRows,
+  scenarioGamma: { scenarioMin: 7580, scenarioMax: 7720, steps: 281 },
+});
+assert.strictEqual(scenarioOut.stage1.scenarioRepricedGammaFlip.status, 'SCENARIO_REPRICED_DIAGNOSTIC');
+assert(scenarioOut.qualityFlags.includes('SCENARIO_GAMMA_IS_DIAGNOSTIC_NOT_CANONICAL'));
+assert.deepStrictEqual(scenarioOut.stage1.rawMap, runEngine({ ...snapshot, rows: scenarioRows }).stage1.rawMap);
+
+const insufficientScenario = runEngine({
+  ...snapshot,
+  scenarioGamma: { scenarioMin: 7580, scenarioMax: 7720, steps: 281 },
+});
+assert.strictEqual(insufficientScenario.stage1.scenarioRepricedGammaFlip.status, 'DATA_INSUFFICIENT');
+assert(insufficientScenario.qualityFlags.includes('SCENARIO_GAMMA_DATA_INSUFFICIENT'));
+
 // Stage 2 is independent: changing drivers must not move Stage 1 raw map.
 const down = runEngine({ ...snapshot, marketDrivers: { ES: 'down', NQ: 'down', VIX: 'up' } });
 assert.deepStrictEqual(down.stage1.rawMap, out.stage1.rawMap);
