@@ -3,8 +3,8 @@
 This layer is downstream from hypothesis/model selection. It evaluates only
 precomputed causal positions against forward returns; it never generates signals.
 DSR is applied only to return-based strategy evaluation, not to classifier scores.
-Tail, liquidity/capacity and stability diagnostics are explicit and fail closed
-when their required inputs are not configured.
+Tail, liquidity/capacity, latency and stability diagnostics are explicit and fail
+closed when their required inputs are not configured.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ class ExecutionConfig:
     periods_per_year: float = 252.0
     transaction_cost_bps: float = 0.0
     slippage_bps: float = 0.0
+    minimum_acceptable_return_per_period: float = 0.0
     dsr_confidence: float = 0.95
     tail_confidence_levels: tuple[float, ...] = (0.95, 0.99)
     stability_window: int | None = None
@@ -34,12 +35,19 @@ class ExecutionConfig:
     trade_notional_col: str | None = None
     max_spread_bps: float | None = None
     max_participation_rate: float | None = None
+    decision_time_col: str | None = None
+    order_time_col: str | None = None
+    fill_time_col: str | None = None
+    max_decision_to_order_ms: float | None = None
+    max_order_to_fill_ms: float | None = None
 
     def validate(self) -> None:
         if self.periods_per_year <= 0:
             raise ValueError("periods_per_year must be > 0")
         if self.transaction_cost_bps < 0 or self.slippage_bps < 0:
             raise ValueError("costs/slippage cannot be negative")
+        if not np.isfinite(self.minimum_acceptable_return_per_period):
+            raise ValueError("minimum_acceptable_return_per_period must be finite")
         if not (0.5 < self.dsr_confidence < 1):
             raise ValueError("dsr_confidence must be in (0.5, 1)")
         if not self.tail_confidence_levels:
@@ -59,17 +67,37 @@ class ExecutionConfig:
             if not self.dollar_volume_col or not self.trade_notional_col:
                 raise ValueError("max_participation_rate requires dollar_volume_col and trade_notional_col")
 
+        latency_cols = (self.decision_time_col, self.order_time_col, self.fill_time_col)
+        if any(latency_cols) and not all(latency_cols):
+            raise ValueError("latency diagnostics require decision_time_col, order_time_col and fill_time_col together")
+        if self.max_decision_to_order_ms is not None:
+            if self.max_decision_to_order_ms < 0:
+                raise ValueError("max_decision_to_order_ms cannot be negative")
+            if not all(latency_cols):
+                raise ValueError("max_decision_to_order_ms requires all latency timestamp columns")
+        if self.max_order_to_fill_ms is not None:
+            if self.max_order_to_fill_ms < 0:
+                raise ValueError("max_order_to_fill_ms cannot be negative")
+            if not all(latency_cols):
+                raise ValueError("max_order_to_fill_ms requires all latency timestamp columns")
+
 
 def _clean_frame(df: pd.DataFrame, config: ExecutionConfig) -> pd.DataFrame:
     config.validate()
     required = {config.position_col, config.forward_return_col}
-    optional_numeric = []
+    optional_numeric: list[str] = []
+    timestamp_cols: list[str] = []
     if config.regime_col:
         required.add(config.regime_col)
     for col in (config.spread_bps_col, config.dollar_volume_col, config.trade_notional_col):
         if col:
             required.add(col)
             optional_numeric.append(col)
+    for col in (config.decision_time_col, config.order_time_col, config.fill_time_col):
+        if col:
+            required.add(col)
+            timestamp_cols.append(col)
+
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"missing required execution columns: {sorted(missing)}")
@@ -81,11 +109,14 @@ def _clean_frame(df: pd.DataFrame, config: ExecutionConfig) -> pd.DataFrame:
     cols = [config.position_col, config.forward_return_col]
     if config.regime_col:
         cols.append(config.regime_col)
-    cols.extend(c for c in optional_numeric if c not in cols)
+    cols.extend(c for c in optional_numeric + timestamp_cols if c not in cols)
     out = df.loc[:, cols].copy()
-    numeric_cols = [config.position_col, config.forward_return_col] + optional_numeric
-    for col in numeric_cols:
+
+    for col in [config.position_col, config.forward_return_col] + optional_numeric:
         out[col] = pd.to_numeric(out[col], errors="coerce")
+    for col in timestamp_cols:
+        out[col] = pd.to_datetime(out[col], errors="coerce", utc=True)
+
     out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=[config.position_col, config.forward_return_col])
     if out.empty:
         raise ValueError("no complete execution rows")
@@ -145,6 +176,31 @@ def _profit_factor(returns: pd.Series) -> float:
     if neg == 0:
         return float("inf") if pos > 0 else 0.0
     return pos / neg
+
+
+def _compounded_return(returns: pd.Series) -> float:
+    r = returns.astype(float)
+    if (r <= -1.0).any():
+        return -1.0
+    return float(np.prod(1.0 + r.values) - 1.0)
+
+
+def _annualized_growth(compounded_return: float, periods: int, periods_per_year: float) -> float | None:
+    if periods <= 0 or periods_per_year <= 0 or compounded_return <= -1.0:
+        return None
+    years = periods / periods_per_year
+    if years <= 0:
+        return None
+    return float((1.0 + compounded_return) ** (1.0 / years) - 1.0)
+
+
+def _sortino_ratio(returns: pd.Series, mar_per_period: float, periods_per_year: float) -> float | None:
+    excess = returns.astype(float) - mar_per_period
+    downside = np.minimum(excess.values, 0.0)
+    downside_deviation = float(np.sqrt(np.mean(downside ** 2)))
+    if downside_deviation <= 0:
+        return None
+    return float(excess.mean() / downside_deviation * sqrt(periods_per_year))
 
 
 def empirical_tail_risk(returns: Iterable[float], confidence_levels: Iterable[float]) -> dict[str, object]:
@@ -237,7 +293,7 @@ def deflated_sharpe_ratio(
     }
 
 
-def _core_metrics(applied: pd.DataFrame, config: ExecutionConfig) -> dict[str, float | int]:
+def _core_metrics(applied: pd.DataFrame, config: ExecutionConfig) -> dict[str, float | int | None | str]:
     r = applied["net_strategy_return"].astype(float)
     gross = applied["gross_strategy_return"].astype(float)
     std = float(r.std(ddof=1)) if len(r) > 1 else 0.0
@@ -247,13 +303,24 @@ def _core_metrics(applied: pd.DataFrame, config: ExecutionConfig) -> dict[str, f
     entries = int(applied["entry_event"].sum())
     max_dd = _max_drawdown(r)
     recovery = float("inf") if max_dd <= -1 else (1.0 / (1.0 + max_dd) - 1.0 if max_dd < 0 else 0.0)
+    compounded = _compounded_return(r)
+    cagr = _annualized_growth(compounded, len(r), config.periods_per_year)
+    sortino = _sortino_ratio(r, config.minimum_acceptable_return_per_period, config.periods_per_year)
+    calmar = None if cagr is None or max_dd >= 0 else float(cagr / abs(max_dd))
     return {
         "observations": int(len(applied)),
         "gross_total_return_arithmetic": float(gross.sum()),
         "net_total_return_arithmetic": float(r.sum()),
+        "net_total_return_compounded": compounded,
+        "annualized_compounded_growth": cagr,
+        "annualization_basis_periods_per_year": float(config.periods_per_year),
+        "annualization_note": "Diagnostic only; periods_per_year must match the evaluated decision frequency.",
         "cost_drag_arithmetic": float((gross - r).sum()),
         "sharpe_annualized": sharpe,
+        "sortino_annualized": sortino,
+        "minimum_acceptable_return_per_period": float(config.minimum_acceptable_return_per_period),
         "max_drawdown": max_dd,
+        "calmar_ratio": calmar,
         "recovery_gain_required_after_max_drawdown": recovery,
         "profit_factor": _profit_factor(r),
         "active_period_win_rate": float((active > 0).mean()) if len(active) else 0.0,
@@ -304,6 +371,54 @@ def _liquidity_feasibility(applied: pd.DataFrame, config: ExecutionConfig) -> di
     return out
 
 
+def _execution_latency(applied: pd.DataFrame, config: ExecutionConfig) -> dict[str, object]:
+    if not all((config.decision_time_col, config.order_time_col, config.fill_time_col)):
+        return {"status": "NOT_EVALUATED", "reason": "decision/order/fill timestamps not configured"}
+
+    entries = applied.loc[applied["entry_event"] == 1].copy()
+    cols = [config.decision_time_col, config.order_time_col, config.fill_time_col]
+    entries = entries.dropna(subset=cols)
+    if entries.empty:
+        return {"status": "INSUFFICIENT_DATA", "reason": "no entry rows have complete decision/order/fill timestamps"}
+
+    d2o = (entries[config.order_time_col] - entries[config.decision_time_col]).dt.total_seconds() * 1000.0
+    o2f = (entries[config.fill_time_col] - entries[config.order_time_col]).dt.total_seconds() * 1000.0
+    d2f = (entries[config.fill_time_col] - entries[config.decision_time_col]).dt.total_seconds() * 1000.0
+    chronology_violations = int(((d2o < 0) | (o2f < 0)).sum())
+
+    violations: dict[str, int] = {"timestamp_chronology": chronology_violations}
+    limits_configured = False
+    if config.max_decision_to_order_ms is not None:
+        limits_configured = True
+        violations["decision_to_order"] = int((d2o > config.max_decision_to_order_ms).sum())
+    if config.max_order_to_fill_ms is not None:
+        limits_configured = True
+        violations["order_to_fill"] = int((o2f > config.max_order_to_fill_ms).sum())
+
+    status = "DIAGNOSTIC_ONLY"
+    if chronology_violations > 0:
+        status = "FAIL"
+    elif limits_configured:
+        status = "PASS" if sum(violations.values()) == 0 else "FAIL"
+
+    def stats(x: pd.Series) -> dict[str, float]:
+        return {
+            "median_ms": float(x.median()),
+            "p95_ms": float(x.quantile(0.95)),
+            "max_ms": float(x.max()),
+        }
+
+    return {
+        "status": status,
+        "observations": int(len(entries)),
+        "decision_to_order": stats(d2o),
+        "order_to_fill": stats(o2f),
+        "decision_to_fill": stats(d2f),
+        "violations": violations,
+        "note": "No latency threshold is inferred automatically; configured limits must come from execution policy or measured infrastructure SLOs.",
+    }
+
+
 def _stability_diagnostic(applied: pd.DataFrame, config: ExecutionConfig) -> dict[str, object]:
     window = config.stability_window
     if window is None:
@@ -339,11 +454,12 @@ def evaluate_strategy(
     *,
     trial_sharpes_annualized: Iterable[float] | None = None,
 ) -> dict[str, object]:
-    """Return cost, tail, liquidity, stability, regime and optional DSR diagnostics."""
+    """Return cost, risk, latency, liquidity, stability, regime and optional DSR diagnostics."""
     applied = apply_costs(df, config)
     metrics = _core_metrics(applied, config)
     tail_risk = empirical_tail_risk(applied["net_strategy_return"].values, config.tail_confidence_levels)
     liquidity = _liquidity_feasibility(applied, config)
+    latency = _execution_latency(applied, config)
     stability = _stability_diagnostic(applied, config)
 
     regimes = {}
@@ -365,6 +481,7 @@ def evaluate_strategy(
         "metrics": metrics,
         "tail_risk": tail_risk,
         "liquidity_feasibility": liquidity,
+        "execution_latency": latency,
         "stability_diagnostic": stability,
         "regime_metrics": regimes,
         "deflated_sharpe": dsr,
@@ -372,9 +489,14 @@ def evaluate_strategy(
             "POSITIONS_MUST_BE_CAUSAL_AND_PRECOMPUTED",
             "FORWARD_RETURNS_ARE_LABELS_NOT_FEATURES",
             "TRANSACTION_COSTS_AND_SLIPPAGE_APPLIED_TO_TURNOVER",
+            "COMPOUNDED_WEALTH_REPORTED_SEPARATELY_FROM_ARITHMETIC_RETURN",
+            "SORTINO_MAR_IS_EXPLICIT_NOT_IMPLICIT",
+            "CALMAR_IS_DIAGNOSTIC_AND_USES_COMPOUNDED_ANNUALIZATION",
             "TAIL_RISK_IS_EMPIRICAL_NOT_NORMAL_ASSUMED",
             "LIQUIDITY_LIMITS_ONLY_APPLY_WHEN_EXPLICITLY_CONFIGURED",
             "LIQUIDITY_DIAGNOSTICS_DO_NOT_DOUBLE_COUNT_EXECUTION_COSTS",
+            "LATENCY_REQUIRES_DECISION_ORDER_FILL_TIMESTAMPS",
+            "LATENCY_THRESHOLDS_ARE_NEVER_INVENTED",
             "STABILITY_DIAGNOSTIC_DOES_NOT_AUTO_RETRAIN_OR_AUTO_ADAPT",
             "DSR_USES_ACTUAL_TESTED_TRIALS_NOT_ARBITRARY_N",
             "DSR_IS_FOR_RETURN_SERIES_NOT_CLASSIFIER_LOGLOSS",
