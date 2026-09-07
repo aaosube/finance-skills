@@ -49,6 +49,7 @@ class AIResearchLayerTests(unittest.TestCase):
                     "name": "bad",
                     "features": ["future_close"],
                     "interactions": [],
+                    "assumptions": ["future data would be causal"],
                     "rationale": "leakage",
                 },
                 self.cfg,
@@ -61,14 +62,30 @@ class AIResearchLayerTests(unittest.TestCase):
                 "features": ["asia_range_z", "gex_flip_distance"],
                 "interactions": [["asia_range_z", "gex_flip_distance"]],
                 "mechanism": "Overnight displacement interacts with dealer geometry.",
+                "assumptions": ["the dealer-state snapshot is causal at decision time"],
                 "expected_regimes": ["volatile"],
                 "failure_modes": ["macro discontinuity"],
                 "rationale": "testable mechanism",
             },
             self.cfg,
         )
+        self.assertEqual(spec.assumptions, ("the dealer-state snapshot is causal at decision time",))
         self.assertEqual(spec.expected_regimes, ("volatile",))
         self.assertEqual(spec.failure_modes, ("macro discontinuity",))
+
+    def test_missing_assumption_is_rejected(self):
+        with self.assertRaises(ValueError):
+            validate_hypothesis(
+                {
+                    "name": "assumption-free",
+                    "features": ["asia_range_z"],
+                    "interactions": [],
+                    "mechanism": "claim",
+                    "failure_modes": ["regime change"],
+                    "rationale": "claim",
+                },
+                self.cfg,
+            )
 
     def test_interactions_are_engine_owned(self):
         spec = HypothesisSpec(
