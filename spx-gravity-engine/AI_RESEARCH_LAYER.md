@@ -1,72 +1,138 @@
-# SPX Gravity Engine — AI Research Layer
+# Market Gravity Engine — Quant Research Layer
 
-## Position in the system
+## Role
 
-The AI layer is **not** a replacement for the Gravity Engine and is not allowed to mutate canonical structural stages.
+`QuantAI` is a constrained senior-quant hypothesis generator inside Market Gravity Engine. It is not a trading guru, not the execution engine, and not the authority that scores its own ideas.
 
-Pipeline:
+The useful parts of the Quant Trading Strategist prompt are preserved:
+
+- hypothesis first;
+- economic / microstructure intuition before model complexity;
+- transaction costs and slippage;
+- regime testing;
+- drawdown, turnover and trade-frequency reporting;
+- walk-forward / multiple-testing control;
+- explicit attempt to falsify every strategy.
+
+The unsafe parts are deliberately changed:
+
+- no LLM-generated Python is executed;
+- no `exec()` / `eval()`;
+- no repeated optimization on the untouched test set;
+- no arbitrary `N=100` for DSR;
+- no direct optimization of Sharpe inside the hypothesis loop;
+- yfinance is smoke-test / research convenience only, not the 23h production data source.
+
+## System placement
 
 1. Causal data gate
-2. 23h session reconstruction (ES/NQ + SPX cash identity)
-3. Macro/regime state
-4. GEX/DEX/VEX/CHEX + OI reconstruction
-5. Structural mass / walls / local flip / pockets
-6. Reachability / NGC / barrier geometry
-7. Boundary competition labels
-8. **AI hypothesis layer** — proposes interactions over the frozen feature matrix
-9. Calibration / OOS test owned by the evaluator
-10. Trigger / execution
-11. Contract EV and monetization
+2. Session reconstruction / asset profile
+3. Macro + volatility regime
+4. Options / dealer state where applicable
+5. Structural geometry
+6. Reachability / NGC
+7. Boundary competition
+8. **QuantAI hypothesis layer**
+9. Engine-owned calibration / OOS test
+10. Trigger / position generation
+11. **Cost-aware strategy evaluator**
+12. Underlying EV
+13. Option-contract EV, if applicable
 
-The AI sees only feature names and TRAIN-only results during candidate generation.
+The same research contract supports `index`, `etf`, and `stock` profiles. SPX remains the first specialized profile.
 
-## Hard invariants
+## QuantAI output contract
 
-- No `exec()` or `eval()` of model-generated text.
-- API keys are read from environment variables only.
-- The target column, split dates/fractions, metrics and evaluator are engine-owned.
-- Time series are split chronologically; no random train/test split.
-- Candidate generation stops before calibration/test evaluation.
-- Calibration selects the winner from the frozen candidate set.
-- The untouched test set is evaluated once and is never fed back to the LLM.
-- Structural Gravity levels cannot be changed by the AI layer.
-- Contract profitability remains downstream from underlying/boundary probability.
+QuantAI may return only a structured hypothesis:
 
-## Why the original snippet was changed
+- `name`
+- `mechanism`
+- `features`
+- `interactions`
+- `expected_regimes`
+- `failure_modes`
+- `rationale`
 
-The original prototype had four research-integrity problems:
+It cannot change the target, split, labels, evaluator, structural levels, costs, or risk methodology.
 
-1. It reused the same dataset for AI generation and scoring, creating data-snooping / multiple-testing bias.
-2. It selected the maximum Sharpe from repeated attempts on the same sample.
-3. It executed free-form LLM-generated Python using `exec()`.
-4. It was RTH-centric (`^GSPC`/`^VIX`) and therefore could not represent the 23h ES/NQ Asia → London → premarket path used by Gravity.
+## Validation protocol
 
-The new module preserves the useful idea — AI-assisted hypothesis generation — while moving all execution and evaluation authority back into the deterministic research engine.
+Candidate-generation feedback is no longer in-sample.
 
-## Suggested feature pool for the full Gravity matrix
+```text
+TRAIN
+  └─ purged inner walk-forward feedback to QuantAI
+        ↓
+freeze candidate set
+        ↓
+CALIBRATION selects one candidate
+        ↓
+refit TRAIN + CALIBRATION
+        ↓
+TEST exactly once
+```
 
-Examples (only include fields that are causal at the checkpoint):
+The untouched TEST result is never returned to QuantAI for another iteration.
 
-- `asia_return`, `asia_range_z`, `asia_sweep_state`
-- `london_return`, `london_range_z`, `london_reclaim_state`
-- `overnight_range_z`, `premarket_position`
-- `es_nq_relative_strength`, `vix_change`, `rv_state`, `skew_state`
-- `gex_net`, `gex_gradient`, `gex_pocket_width`, `gex_pocket_velocity`
-- `dex_local`, `vex_local`, `chex_local`
-- `gamma_flip_distance`, `gamma_flip_stability`
-- `ngc_upper`, `ngc_lower`
-- `reach_upper`, `reach_lower`
-- `macro_regime`, `event_state`
-- `boundary_touch_depth`, `reclaim_speed`, `acceptance_state`
+## Prediction metrics
 
-## Model selection objective
-
-Do not optimize Sharpe directly in the hypothesis loop. The core research objective is calibrated state prediction:
+For direction / destination / boundary models:
 
 - log loss
 - multiclass Brier score
 - calibration
-- first-hit accuracy / time-to-hit
-- boundary reversal vs continuation quality
+- first-hit accuracy
+- time-to-hit
+- reversal / continuation quality
 
-Sharpe, profit factor, drawdown and contract EV belong to the downstream execution/monetization evaluation after probability and boundary models are frozen.
+Sharpe is not a valid replacement for probability calibration.
+
+## Strategy / execution metrics
+
+After a model and trigger are frozen, `strategy_evaluator.py` applies:
+
+- transaction costs;
+- slippage;
+- turnover;
+- annualized Sharpe;
+- maximum drawdown;
+- profit factor;
+- active-period win rate;
+- exposure;
+- entries per year;
+- regime breakdown.
+
+### Deflated Sharpe Ratio
+
+DSR is used only on realized strategy return series.
+
+The number of trials must reflect the strategies actually tested (or a justified effective-independent count). The engine does **not** accept an arbitrary prompt instruction such as `N=100` unless 100 trials were genuinely part of the search.
+
+## Regime testing
+
+Regimes are engine-built causal states, not post-hoc labels chosen to make a strategy look good. Examples may include:
+
+- calm / normal / volatile VIX state;
+- macro-event state;
+- positive / negative gamma state;
+- liquidity regime;
+- Asia / London / NY path state;
+- stock-specific earnings / borrow / short / dark-pool state.
+
+## Data hierarchy
+
+Production research uses the canonical Market Gravity dataset assembled from Railway / QuantData / market-data sources and the 23h session architecture where relevant.
+
+`yfinance` remains optional for smoke tests and independent checks. It must not silently replace the canonical historical source.
+
+## Falsification rule
+
+Every hypothesis must answer:
+
+> What market inefficiency or conditional mechanism should exist?
+
+and
+
+> What observable condition should make the strategy fail?
+
+A strategy that has no falsifier is not admitted to the research tournament.
