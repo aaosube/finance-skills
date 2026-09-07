@@ -69,6 +69,7 @@ class HypothesisSpec:
     interactions: tuple[tuple[str, str], ...]
     rationale: str
     mechanism: str = ""
+    assumptions: tuple[str, ...] = ()
     expected_regimes: tuple[str, ...] = ()
     failure_modes: tuple[str, ...] = ()
 
@@ -160,6 +161,7 @@ def validate_hypothesis(payload: dict[str, Any], config: ResearchConfig) -> Hypo
     name = str(payload.get("name", "unnamed")).strip()[:120]
     rationale = str(payload.get("rationale", "")).strip()[:2000]
     mechanism = str(payload.get("mechanism", "")).strip()[:2000]
+    assumptions = _clean_string_list(payload.get("assumptions", []))
     expected_regimes = _clean_string_list(payload.get("expected_regimes", []))
     failure_modes = _clean_string_list(payload.get("failure_modes", []))
 
@@ -191,6 +193,8 @@ def validate_hypothesis(payload: dict[str, Any], config: ResearchConfig) -> Hypo
 
     if not mechanism:
         mechanism = rationale
+    if not assumptions:
+        raise ValueError("candidate must state at least one explicit model/market assumption")
     if not failure_modes:
         failure_modes = ("No explicit failure mode supplied; candidate should be treated conservatively.",)
 
@@ -200,6 +204,7 @@ def validate_hypothesis(payload: dict[str, Any], config: ResearchConfig) -> Hypo
         interactions=tuple(interactions),
         rationale=rationale,
         mechanism=mechanism,
+        assumptions=assumptions,
         expected_regimes=expected_regimes,
         failure_modes=failure_modes,
     )
@@ -291,6 +296,7 @@ Target fixed by the engine: {config.target_col}
 
 Your role:
 - identify a plausible market inefficiency / conditional mechanism;
+- expose the assumptions needed for that mechanism to hold;
 - state where it should work and why it should fail;
 - propose a small, interpretable feature set and interactions.
 
@@ -302,8 +308,10 @@ Hard rules:
    walk-forward evaluation, DSR, calibration, test data, and contract monetization.
 5. Prefer mechanisms grounded in session structure, microstructure, volatility,
    dealer geometry, reachability, boundary competition, or relative-state effects.
-6. Explicitly try to falsify the hypothesis: give at least one failure mode.
-7. Untouched TEST results are never available to you.
+6. State explicit assumptions; fewer justified assumptions are preferable, but the
+   engine does not use an arbitrary assumption-count penalty.
+7. Explicitly try to falsify the hypothesis: give at least one failure mode.
+8. Untouched TEST results are never available to you.
 
 Frozen feature whitelist:
 {json.dumps(list(config.feature_pool), indent=2)}
@@ -315,6 +323,7 @@ Return ONLY one JSON object:
 {{
   "name": "short descriptive name",
   "mechanism": "specific market inefficiency or conditional mechanism",
+  "assumptions": ["assumption required for mechanism to remain valid"],
   "features": ["feature_a", "feature_b"],
   "interactions": [["feature_a", "feature_b"]],
   "expected_regimes": ["where the mechanism should be strongest"],
@@ -341,7 +350,11 @@ def run_ai_research(df: pd.DataFrame, config: ResearchConfig, client: Any | None
     attempts = 0
     while len(candidates) < config.iterations and attempts < config.iterations * 4:
         attempts += 1
-        spec = generate_hypothesis(client, config, train_memory)
+        try:
+            spec = generate_hypothesis(client, config, train_memory)
+        except ValueError as exc:
+            train_memory.append({"status": "hypothesis_schema_rejected", "reason": str(exc)})
+            continue
         signature = (tuple(sorted(spec.features)), tuple(sorted(spec.interactions)))
         if signature in seen:
             train_memory.append({"name": spec.name, "status": "duplicate_rejected"})
@@ -359,6 +372,7 @@ def run_ai_research(df: pd.DataFrame, config: ResearchConfig, client: Any | None
             "features": list(spec.features),
             "interactions": [list(x) for x in spec.interactions],
             "mechanism": spec.mechanism,
+            "assumptions": list(spec.assumptions),
             "expected_regimes": list(spec.expected_regimes),
             "failure_modes": list(spec.failure_modes),
             "train_metric_source": "PURGED_INNER_WALK_FORWARD",
@@ -416,6 +430,7 @@ def run_ai_research(df: pd.DataFrame, config: ResearchConfig, client: Any | None
             "NO_EXEC_OF_LLM_CODE",
             "FEATURE_WHITELIST_ONLY",
             "CHRONOLOGICAL_SPLIT_ONLY",
+            "EXPLICIT_ASSUMPTION_REGISTRY_REQUIRED",
             "TRAIN_FEEDBACK_IS_PURGED_INNER_WALK_FORWARD_ONLY",
             "TEST_RESULTS_NEVER_FED_TO_LLM",
             "AI_CANNOT_CHANGE_TARGET_OR_METRICS",
