@@ -1,0 +1,5 @@
+numpy>=2.0,<3
+pandas>=2.2,<4
+scikit-learn>=1.5,<2
+# Optional local Parquet support; install only if needed:
+# pyarrow>=17,<22

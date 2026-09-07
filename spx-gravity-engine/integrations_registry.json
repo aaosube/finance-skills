@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "policy": "No external project may mutate canonical Stage 1, place broker orders, or become a market-data source without provenance and validation.",
+  "integrations": [
+    {"project":"HKUDS/Vibe-Trading","license":"MIT","decision":"ADOPT_PATTERNS_REIMPLEMENTED","runtime_dependency":false,"accepted":["local CSV/Parquet research ingestion","structured shadow/counterfactual research","chronological OOS benchmarking"],"rejected":["autonomous broker execution","LLM-generated executable strategy code","unverified external data routing"]},
+    {"project":"mksglu/context-mode","license":"Elastic-2.0","decision":"OPTIONAL_DEV_INFRA_PINNED","runtime_dependency":false,"accepted":["MCP context-budget infrastructure for coding/research agents"],"rejected":["embedding its source into the trading engine"]},
+    {"project":"jo-inc/camofox-browser","license":"MIT","decision":"OPTIONAL_AUTHORIZED_WEB_INGESTION_PINNED","runtime_dependency":false,"accepted":["isolated browser service for authorized/public web ingestion"],"rejected":["bypassing authentication/access controls","using browser output as an unverified canonical market feed"]},
+    {"project":"Fincept-Corporation/FinceptTerminal","license":"AGPL-3.0 plus project-specific commercial/internal-use restrictions","decision":"REFERENCE_ONLY_NO_CODE_VENDORED","runtime_dependency":false,"accepted":["architecture and connector ideas for independent evaluation"],"rejected":["copying or deriving code into this repository"]},
+    {"project":"gammagrid/gammagrid","license":"AGPL-3.0","decision":"REFERENCE_ONLY_NO_CODE_VENDORED","runtime_dependency":false,"accepted":["historical GEX replay concept and scenario-repricing requirement"],"rejected":["copying AGPL implementation into this repository","Yahoo-derived data as SPX canonical source"]},
+    {"project":"The-Swarm-Corporation/AutoHedge","decision":"NOT_ADDED","runtime_dependency":false,"reason":"No incremental SPX/options data or validated alpha; autonomous execution increases attack and model-risk surface."},
+    {"project":"ClawRouter","decision":"NOT_ADDED","runtime_dependency":false,"reason":"Model-routing layer is redundant with the existing router; no market-quality gain established."}
+  ]
+}

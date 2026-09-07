@@ -1,0 +1,33 @@
+name: SPX Gravity Engine Tests
+
+on:
+  pull_request:
+    paths:
+      - 'spx-gravity-engine/**'
+      - 'infra/**'
+      - '.github/workflows/spx-gravity-engine-test.yml'
+  push:
+    paths:
+      - 'spx-gravity-engine/**'
+      - 'infra/**'
+      - '.github/workflows/spx-gravity-engine-test.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Python research dependencies
+        run: python -m pip install -r spx-gravity-engine/requirements-research.txt
+      - name: JavaScript invariant tests
+        run: |
+          node spx-gravity-engine/engine.test.js
+          node spx-gravity-engine/gamma_scenario.test.js
+      - name: Python research tests
+        run: python -m unittest discover -s spx-gravity-engine -p 'test_*.py'
