@@ -12,6 +12,7 @@
  */
 
 const CONTRACT_MULTIPLIER = 100;
+const { scenarioRepricedGammaFlip } = require('./gamma_scenario');
 
 function assertFinite(name, value) {
   if (!Number.isFinite(value)) throw new Error(`${name} must be finite`);
@@ -202,6 +203,17 @@ function runEngine(snapshot) {
     ? experimentalProjectionLevels(Number(snapshot.projectionAnchor ?? spot), expectedMove, snapshot.experimentalMultipliers ?? [])
     : [];
 
+  const scenarioGamma = snapshot.scenarioGamma
+    ? scenarioRepricedGammaFlip(snapshot.rows, {
+        spot,
+        scenarioMin: Number(snapshot.scenarioGamma.scenarioMin),
+        scenarioMax: Number(snapshot.scenarioGamma.scenarioMax),
+        steps: snapshot.scenarioGamma.steps,
+        rate: snapshot.scenarioGamma.rate,
+        dividendYield: snapshot.scenarioGamma.dividendYield,
+      })
+    : null;
+
   return {
     engine: 'SPX Gravity Engine reconstruction',
     version: '0.1-audit',
@@ -215,6 +227,7 @@ function runEngine(snapshot) {
       reachabilityDiagnostic: reachability,
       experimentalProjectionLevels: experimental,
       probabilityDiagnostic,
+      scenarioRepricedGammaFlip: scenarioGamma,
     },
     stage2: stage2Confirmation(snapshot.marketDrivers),
     stage3: {
@@ -226,6 +239,8 @@ function runEngine(snapshot) {
       ...(snapshot.approvedRawMap ? [] : ['HISTORICAL_STAGE1_FORMULA_NOT_YET_RECONCILED']),
       ...(probabilityDiagnostic.length ? ['NORMAL_PROBABILITY_IS_DIAGNOSTIC_ASSUMPTION_ONLY'] : []),
       ...(experimental.length ? ['EXPERIMENTAL_MULTIPLIERS_ISOLATED_FROM_CANONICAL_MAP'] : []),
+      ...(scenarioGamma?.status === 'DATA_INSUFFICIENT' ? ['SCENARIO_GAMMA_DATA_INSUFFICIENT'] : []),
+      ...(scenarioGamma?.status === 'SCENARIO_REPRICED_DIAGNOSTIC' ? ['SCENARIO_GAMMA_IS_DIAGNOSTIC_NOT_CANONICAL'] : []),
     ]
   };
 }
