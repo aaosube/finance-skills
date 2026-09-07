@@ -8,6 +8,7 @@ The useful parts of the Quant Trading Strategist prompt are preserved:
 
 - hypothesis first;
 - economic / microstructure intuition before model complexity;
+- explicit model/market assumptions;
 - transaction costs and slippage;
 - regime testing;
 - drawdown, turnover and trade-frequency reporting;
@@ -36,8 +37,9 @@ The unsafe parts are deliberately changed:
 9. Engine-owned calibration / OOS test
 10. Trigger / position generation
 11. **Cost-aware strategy evaluator**
-12. Underlying EV
-13. Option-contract EV, if applicable
+12. Tail / liquidity-capacity / stability audit
+13. Underlying EV
+14. Option-contract EV, if applicable
 
 The same research contract supports `index`, `etf`, and `stock` profiles. SPX remains the first specialized profile.
 
@@ -47,17 +49,18 @@ QuantAI may return only a structured hypothesis:
 
 - `name`
 - `mechanism`
+- `assumptions`
 - `features`
 - `interactions`
 - `expected_regimes`
 - `failure_modes`
 - `rationale`
 
-It cannot change the target, split, labels, evaluator, structural levels, costs, or risk methodology.
+It cannot change the target, split, labels, evaluator, structural levels, costs, or risk methodology. At least one explicit assumption is required; assumption count is not assigned an arbitrary score or weight.
 
 ## Validation protocol
 
-Candidate-generation feedback is no longer in-sample.
+Candidate-generation feedback is not in-sample.
 
 ```text
 TRAIN
@@ -96,11 +99,19 @@ After a model and trigger are frozen, `strategy_evaluator.py` applies:
 - turnover;
 - annualized Sharpe;
 - maximum drawdown;
+- recovery gain required after maximum drawdown;
 - profit factor;
 - active-period win rate;
 - exposure;
 - entries per year;
-- regime breakdown.
+- regime breakdown;
+- empirical tail VaR / Expected Shortfall without a normality assumption;
+- optional spread / dollar-volume / participation feasibility limits;
+- optional recent-vs-prior stability diagnostics.
+
+Liquidity limits are active only when explicit data columns and limits are configured. Liquidity diagnostics do not silently add a second spread/slippage charge on top of the execution-cost model.
+
+Stability diagnostics do not trigger automatic retraining or model switching. Adaptation requires a separately specified governance rule and OOS evidence.
 
 ### Deflated Sharpe Ratio
 
@@ -131,8 +142,20 @@ Every hypothesis must answer:
 
 > What market inefficiency or conditional mechanism should exist?
 
+> Which explicit assumptions must remain true for the mechanism to make sense?
+
 and
 
 > What observable condition should make the strategy fail?
 
-A strategy that has no falsifier is not admitted to the research tournament.
+A strategy with no explicit assumptions or no falsifier is not admitted to the research tournament.
+
+## 42-laws audit: what is deliberately NOT added
+
+The “42 Laws of Quant Finance” images are treated as an audit checklist, not as a canonical specification. Most items restate principles already enforced by the engine.
+
+No new module is added merely because an image mentions calculus, linear algebra, stochastic calculus, Monte Carlo simulation, C++, reinforcement learning, correlation, or automation. Such methods are admitted only when they solve a defined model/data/execution problem and demonstrate incremental OOS value.
+
+Correlation-breakdown stress belongs to the future multi-asset / portfolio layer rather than the current single-instrument strategy evaluator. Capital sizing/risk budgeting likewise remains a separate downstream layer because index, ETF, stock and option contracts require different capital and liquidity mechanics.
+
+This policy prevents feature/method accumulation from being mistaken for research quality.
