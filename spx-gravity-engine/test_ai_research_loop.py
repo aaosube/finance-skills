@@ -1,26 +1,30 @@
 import unittest
+
 import numpy as np
 import pandas as pd
 
 from ai_research_loop import (
-    ResearchConfig,
     HypothesisSpec,
-    chronological_split,
-    validate_hypothesis,
+    ResearchConfig,
     build_design_matrix,
+    chronological_split,
+    inner_walk_forward_score,
+    validate_hypothesis,
 )
 
 
 class AIResearchLayerTests(unittest.TestCase):
     def setUp(self):
-        idx = pd.date_range("2026-01-01", periods=60, freq="h")
+        idx = pd.date_range("2026-01-01", periods=90, freq="h")
         rng = np.random.default_rng(7)
+        x1 = rng.normal(size=90)
+        x2 = rng.normal(size=90)
         self.df = pd.DataFrame(
             {
-                "asia_range_z": rng.normal(size=60),
-                "gex_flip_distance": rng.normal(size=60),
-                "ngc_lower": rng.normal(size=60),
-                "target": np.where(np.arange(60) % 3 == 0, "LOWER_FIRST", "UPPER_FIRST"),
+                "asia_range_z": x1,
+                "gex_flip_distance": x2,
+                "ngc_lower": rng.normal(size=90),
+                "target": np.where(x1 + 0.2 * x2 > 0, "UPPER_FIRST", "LOWER_FIRST"),
             },
             index=idx,
         )
@@ -28,6 +32,9 @@ class AIResearchLayerTests(unittest.TestCase):
             target_col="target",
             feature_pool=("asia_range_z", "gex_flip_distance", "ngc_lower"),
             iterations=2,
+            inner_min_train=20,
+            inner_test_size=5,
+            inner_gap=1,
         )
 
     def test_split_is_chronological(self):
@@ -47,6 +54,22 @@ class AIResearchLayerTests(unittest.TestCase):
                 self.cfg,
             )
 
+    def test_quant_hypothesis_metadata_is_retained(self):
+        spec = validate_hypothesis(
+            {
+                "name": "session-mechanism",
+                "features": ["asia_range_z", "gex_flip_distance"],
+                "interactions": [["asia_range_z", "gex_flip_distance"]],
+                "mechanism": "Overnight displacement interacts with dealer geometry.",
+                "expected_regimes": ["volatile"],
+                "failure_modes": ["macro discontinuity"],
+                "rationale": "testable mechanism",
+            },
+            self.cfg,
+        )
+        self.assertEqual(spec.expected_regimes, ("volatile",))
+        self.assertEqual(spec.failure_modes, ("macro discontinuity",))
+
     def test_interactions_are_engine_owned(self):
         spec = HypothesisSpec(
             name="x",
@@ -60,6 +83,19 @@ class AIResearchLayerTests(unittest.TestCase):
             x["INT__asia_range_z__X__ngc_lower"].values,
             (self.df["asia_range_z"] * self.df["ngc_lower"]).values,
         )
+
+    def test_train_feedback_uses_inner_walk_forward(self):
+        split = chronological_split(self.df, self.cfg)
+        spec = HypothesisSpec(
+            name="wf",
+            features=("asia_range_z", "gex_flip_distance"),
+            interactions=(),
+            rationale="test",
+        )
+        loss, brier, folds = inner_walk_forward_score(spec, split.train, self.cfg)
+        self.assertTrue(np.isfinite(loss))
+        self.assertTrue(np.isfinite(brier))
+        self.assertGreaterEqual(folds, 1)
 
 
 if __name__ == "__main__":
