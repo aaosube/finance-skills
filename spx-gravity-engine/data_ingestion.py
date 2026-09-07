@@ -38,6 +38,11 @@ _CANONICAL_ALIASES: dict[str, tuple[str, ...]] = {
     "open_interest": ("open_interest", "openinterest", "oi"),
     "volume": ("volume", "vol"),
     "iv": ("iv", "implied_volatility", "impliedvolatility"),
+    "time_to_expiry_years": ("time_to_expiry_years", "time_to_expiry", "tte_years"),
+    "minutes_to_expiry": ("minutes_to_expiry", "minutes_till_expiry", "minutes_until_expiry"),
+    "days_to_expiry": ("days_to_expiry", "dte", "days_till_expiry", "days_until_expiry"),
+    "rate": ("rate", "risk_free_rate", "riskfree_rate"),
+    "dividend_yield": ("dividend_yield", "dividendyield", "q"),
     "gamma": ("gamma",),
     "delta": ("delta",),
     "vanna": ("vanna",),
@@ -50,7 +55,8 @@ _CANONICAL_ALIASES: dict[str, tuple[str, ...]] = {
 
 _NUMERIC_COLUMNS = {
     "strike", "open_interest", "volume", "iv", "gamma", "delta", "vanna", "charm",
-    "bid", "ask", "last", "spot",
+    "bid", "ask", "last", "spot", "time_to_expiry_years", "minutes_to_expiry",
+    "days_to_expiry", "rate", "dividend_yield",
 }
 
 
@@ -176,7 +182,12 @@ def normalize_market_frame(
     required: Iterable[str] = (),
     duplicate_key: Iterable[str] = (),
 ) -> tuple[pd.DataFrame, DataQualityReport]:
-    """Normalize a market export and return the untouched-row-count result + audit report."""
+    """Normalize a market export and return the untouched-row-count result + audit report.
+
+    ``column_map`` is input-name -> canonical-name. It is the preferred route
+    when a vendor export uses a field name not covered by the conservative
+    built-in aliases.
+    """
     if not source or not str(source).strip():
         raise DataQualityError("source is required for provenance")
     if not isinstance(frame, pd.DataFrame):
@@ -241,5 +252,48 @@ def normalize_market_frame(
     return out, report
 
 
-def load_market_file(path: str | Path, **kwargs: object) -> tuple[pd.DataFrame, DataQualityReport]:
+def load_market_file(
+    path: str | Path,
+    **kwargs: object,
+) -> tuple[pd.DataFrame, DataQualityReport]:
     return normalize_market_frame(read_market_file(path), **kwargs)
+
+
+def to_engine_rows(frame: pd.DataFrame) -> list[dict[str, object]]:
+    """Convert normalized canonical option rows to the JS engine contract.
+
+    This is an explicit adapter, not a second normalization pass. Required
+    fields are checked and no default gamma/IV/time values are invented.
+    """
+    required = ("strike", "gamma", "open_interest", "option_type")
+    missing = [c for c in required if c not in frame.columns]
+    if missing:
+        raise DataQualityError(f"cannot build engine rows; missing canonical fields: {missing}")
+
+    field_map = {
+        "strike": "strike",
+        "gamma": "gamma",
+        "open_interest": "openInterest",
+        "option_type": "type",
+        "iv": "iv",
+        "time_to_expiry_years": "timeToExpiryYears",
+        "minutes_to_expiry": "minutesToExpiry",
+        "days_to_expiry": "daysToExpiry",
+        "rate": "rate",
+        "dividend_yield": "dividendYield",
+    }
+    available = [c for c in field_map if c in frame.columns]
+    engine = frame.loc[:, available].rename(columns={c: field_map[c] for c in available}).copy()
+
+    invalid_type = ~engine["type"].isin(["call", "put"])
+    if bool(invalid_type.any()):
+        values = sorted({str(x) for x in engine.loc[invalid_type, "type"].dropna().unique()})
+        raise DataQualityError(f"unsupported option_type values for engine rows: {values}")
+
+    numeric_required = ("strike", "gamma", "openInterest")
+    for column in numeric_required:
+        bad = engine[column].isna() | ~engine[column].map(lambda x: pd.api.types.is_number(x))
+        if bool(bad.any()):
+            raise DataQualityError(f"engine-required numeric field {column!r} contains invalid values")
+
+    return engine.to_dict(orient="records")
