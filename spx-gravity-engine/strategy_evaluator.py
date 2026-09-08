@@ -42,9 +42,9 @@ class ExecutionConfig:
     max_order_to_fill_ms: float | None = None
 
     def validate(self) -> None:
-        if self.periods_per_year <= 0:
+        if not np.isfinite(self.periods_per_year) or self.periods_per_year <= 0:
             raise ValueError("periods_per_year must be > 0")
-        if self.transaction_cost_bps < 0 or self.slippage_bps < 0:
+        if any(not np.isfinite(v) or v < 0 for v in (self.transaction_cost_bps, self.slippage_bps)):
             raise ValueError("costs/slippage cannot be negative")
         if not np.isfinite(self.minimum_acceptable_return_per_period):
             raise ValueError("minimum_acceptable_return_per_period must be finite")
@@ -117,7 +117,9 @@ def _clean_frame(df: pd.DataFrame, config: ExecutionConfig) -> pd.DataFrame:
     for col in timestamp_cols:
         out[col] = pd.to_datetime(out[col], errors="coerce", utc=True)
 
-    out = out.replace([np.inf, -np.inf], np.nan).dropna(subset=[config.position_col, config.forward_return_col])
+    out = out.replace([np.inf, -np.inf], np.nan)
+    if out[[config.position_col, config.forward_return_col]].isna().any().any():
+        raise ValueError('execution rows must have finite positions and forward returns; gaps cannot be dropped')
     if out.empty:
         raise ValueError("no complete execution rows")
     if (out[config.position_col].abs() > 1.0 + 1e-12).any():
@@ -165,7 +167,8 @@ def _moments(x: np.ndarray) -> tuple[float, float]:
 
 def _max_drawdown(returns: pd.Series) -> float:
     equity = (1.0 + returns.astype(float)).cumprod()
-    peak = equity.cummax()
+    # Starting capital is part of the high-water mark, including the first loss.
+    peak = equity.cummax().clip(lower=1.0)
     dd = equity / peak - 1.0
     return float(dd.min())
 
@@ -367,7 +370,14 @@ def _liquidity_feasibility(applied: pd.DataFrame, config: ExecutionConfig) -> di
 
     if limits_configured:
         total_violations = sum(int(v) for v in out["violations"].values())
-        out["status"] = "PASS" if total_violations == 0 else "FAIL"
+        required = []
+        if config.max_spread_bps is not None:
+            required.append(config.spread_bps_col)
+        if config.max_participation_rate is not None:
+            required.extend([config.dollar_volume_col, config.trade_notional_col])
+        missing = int(applied[required].isna().any(axis=1).sum())
+        out['incomplete_rows'] = missing
+        out["status"] = "FAIL" if total_violations else ('INSUFFICIENT_DATA' if missing else 'PASS')
     return out
 
 
@@ -377,6 +387,7 @@ def _execution_latency(applied: pd.DataFrame, config: ExecutionConfig) -> dict[s
 
     entries = applied.loc[applied["entry_event"] == 1].copy()
     cols = [config.decision_time_col, config.order_time_col, config.fill_time_col]
+    incomplete_entries = int(entries[cols].isna().any(axis=1).sum())
     entries = entries.dropna(subset=cols)
     if entries.empty:
         return {"status": "INSUFFICIENT_DATA", "reason": "no entry rows have complete decision/order/fill timestamps"}
@@ -399,7 +410,7 @@ def _execution_latency(applied: pd.DataFrame, config: ExecutionConfig) -> dict[s
     if chronology_violations > 0:
         status = "FAIL"
     elif limits_configured:
-        status = "PASS" if sum(violations.values()) == 0 else "FAIL"
+        status = "FAIL" if sum(violations.values()) else ('INSUFFICIENT_DATA' if incomplete_entries else 'PASS')
 
     def stats(x: pd.Series) -> dict[str, float]:
         return {
@@ -411,6 +422,7 @@ def _execution_latency(applied: pd.DataFrame, config: ExecutionConfig) -> dict[s
     return {
         "status": status,
         "observations": int(len(entries)),
+        "incomplete_entry_rows": incomplete_entries,
         "decision_to_order": stats(d2o),
         "order_to_fill": stats(o2f),
         "decision_to_fill": stats(d2f),

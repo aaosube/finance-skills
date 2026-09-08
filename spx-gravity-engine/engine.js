@@ -36,6 +36,7 @@ function gexPerOnePercent({ gamma, openInterest, spot, type }) {
   assertFinite('gamma', gamma);
   assertFinite('openInterest', openInterest);
   assertFinite('spot', spot);
+  if (gamma < 0 || openInterest < 0 || spot <= 0) throw new Error('gamma/OI must be nonnegative and spot positive');
   const side = String(type).toLowerCase();
   if (side !== 'call' && side !== 'put') throw new Error(`Unknown option type: ${type}`);
   const signed = side === 'call' ? 1 : -1;
@@ -45,10 +46,14 @@ function gexPerOnePercent({ gamma, openInterest, spot, type }) {
 function aggregateByStrike(rows, spot) {
   const map = new Map();
   for (const r of rows) {
+    if ([r.strike, r.gamma, r.openInterest ?? r.oi].some(v => v === null || v === undefined || typeof v === 'boolean' || String(v).trim() === '')) {
+      throw new Error('strike, gamma and OI must be present numeric values');
+    }
     const strike = Number(r.strike);
     const gamma = Number(r.gamma);
     const openInterest = Number(r.openInterest ?? r.oi);
     assertFinite('strike', strike);
+    if (strike <= 0) throw new Error('strike must be positive');
     const gex = gexPerOnePercent({ gamma, openInterest, spot, type: r.type });
     if (!map.has(strike)) {
       map.set(strike, {
@@ -77,8 +82,8 @@ function aggregateByStrike(rows, spot) {
 
 function findWalls(strikes) {
   if (!strikes.length) return { callWall: null, putWall: null };
-  const callWall = strikes.reduce((best, x) => (!best || x.callGex > best.callGex ? x : best), null);
-  const putWall = strikes.reduce((best, x) => (!best || x.putGex < best.putGex ? x : best), null);
+  const callWall = strikes.filter(x => x.callGex > 0).reduce((best, x) => (!best || x.callGex > best.callGex ? x : best), null);
+  const putWall = strikes.filter(x => x.putGex < 0).reduce((best, x) => (!best || x.putGex < best.putGex ? x : best), null);
   return {
     callWall: callWall ? { strike: callWall.strike, gex: callWall.callGex } : null,
     putWall: putWall ? { strike: putWall.strike, gex: putWall.putGex } : null,
@@ -119,6 +124,10 @@ function distanceReachability(strike, spot, expectedMove) {
  * expectedMove is interpreted as 1-sigma absolute move only when caller explicitly enables it.
  */
 function normalHitDiagnostic(strike, spot, expectedMove) {
+  assertFinite('strike', strike);
+  assertFinite('spot', spot);
+  assertFinite('expectedMove', expectedMove);
+  if (expectedMove <= 0) throw new Error('expectedMove must be > 0');
   const z = Math.abs(strike - spot) / expectedMove;
   return 2 * (1 - normalCdf(z));
 }
@@ -154,9 +163,13 @@ function fallbackDiagnosticMap(strikes, spot, expectedMove) {
 
 function experimentalProjectionLevels(anchor, expectedMove, multipliers) {
   if (!Array.isArray(multipliers) || multipliers.length === 0) return [];
+  assertFinite('anchor', anchor);
+  assertFinite('expectedMove', expectedMove);
+  if (expectedMove <= 0) throw new Error('expectedMove must be > 0');
   return multipliers.map(m => {
     const k = Number(m);
     assertFinite('projection multiplier', k);
+    if (k <= 0) throw new Error('projection multiplier must be > 0');
     return {
       multiplier: k,
       lower: anchor - expectedMove / k,

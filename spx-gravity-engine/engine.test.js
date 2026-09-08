@@ -7,6 +7,14 @@ const {
 
 // GEX sign + scale invariant.
 const spot = 7650;
+const { aggregateByStrike, findWalls, experimentalProjectionLevels, normalHitDiagnostic } = require('./engine');
+assert.throws(() => aggregateByStrike([{strike: 7650, gamma: null, openInterest: 1, type: 'call'}], spot));
+assert.throws(() => gexPerOnePercent({gamma: .01, openInterest: -1, spot, type: 'call'}));
+assert.deepStrictEqual(findWalls([{strike: 7650, callGex: 0, putGex: 0}]), {callWall: null, putWall: null});
+assert.strictEqual(findWalls([{strike: 7650, callGex: 2, putGex: 0}]).putWall, null);
+assert.throws(() => experimentalProjectionLevels(spot, 40, [0]));
+assert.throws(() => experimentalProjectionLevels(spot, 40, [-1]));
+assert.throws(() => normalHitDiagnostic(spot, spot, 0));
 const call = gexPerOnePercent({ gamma: 0.01, openInterest: 1000, spot, type: 'call' });
 const put = gexPerOnePercent({ gamma: 0.01, openInterest: 1000, spot, type: 'put' });
 assert(call > 0);
