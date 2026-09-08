@@ -5,6 +5,19 @@ from strategy_evaluator import _max_drawdown, apply_costs, evaluate_strategy, Ex
 
 
 class AuditRegressions(unittest.TestCase):
+    def test_target_cannot_leak_into_feature_pool(self):
+        from ai_research_loop import ResearchConfig
+        with self.assertRaisesRegex(ValueError, 'target label'):
+            ResearchConfig(target_col='y', feature_pool=('x', 'y')).validate()
+
+    def test_outer_split_purges_future_labels(self):
+        from ai_research_loop import ResearchConfig, chronological_split
+        idx = pd.date_range('2026-01-01', periods=60, tz='UTC')
+        data = pd.DataFrame({'x': range(60), 'y': [0,1]*30, 'end': idx + pd.Timedelta(days=3), 'session': idx.date.astype(str)}, index=idx)
+        split = chronological_split(data, ResearchConfig(target_col='y', feature_pool=('x',), label_end_col='end', session_col='session'))
+        self.assertTrue((split.train['end'] < split.calibration.index[0]).all())
+        self.assertTrue((split.calibration['end'] < split.test.index[0]).all())
+
     def test_initial_loss_counts_from_starting_capital(self):
         self.assertAlmostEqual(_max_drawdown(pd.Series([-.1])), -.1)
         self.assertAlmostEqual(_max_drawdown(pd.Series([-.1, -.1])), -.19)

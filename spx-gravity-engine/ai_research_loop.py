@@ -40,6 +40,8 @@ class ResearchConfig:
     inner_test_size: int = 5
     inner_gap: int = 1
     inner_step: int | None = None
+    label_end_col: str | None = None
+    session_col: str | None = None
 
     def validate(self) -> None:
         if not (0 < self.train_fraction < 1):
@@ -52,6 +54,12 @@ class ResearchConfig:
             raise ValueError("iterations must be >= 1")
         if not self.feature_pool:
             raise ValueError("feature_pool cannot be empty")
+        if self.target_col in self.feature_pool or len(set(self.feature_pool)) != len(self.feature_pool):
+            raise ValueError('features must be unique and cannot include the target label')
+        if bool(self.label_end_col) != bool(self.session_col):
+            raise ValueError('label_end_col and session_col must be configured together')
+        if any(c in self.feature_pool for c in (self.label_end_col, self.session_col) if c):
+            raise ValueError('purge metadata cannot be used as model features')
         if self.inner_min_train < 10:
             raise ValueError("inner_min_train must be >= 10")
         if self.inner_test_size < 2:
@@ -112,16 +120,34 @@ def ensure_causal_frame(df: pd.DataFrame, config: ResearchConfig) -> pd.DataFram
     if df.index.has_duplicates:
         raise ValueError("duplicate timestamps are not allowed")
     required = set(config.feature_pool) | {config.target_col}
+    if config.label_end_col:
+        required.update([config.label_end_col, config.session_col])
     missing = required - set(df.columns)
     if missing:
         raise ValueError(f"missing required columns: {sorted(missing)}")
-    clean = df.loc[:, list(config.feature_pool) + [config.target_col]].copy()
+    columns = list(config.feature_pool) + [config.target_col]
+    if config.label_end_col:
+        columns.extend([config.label_end_col, config.session_col])
+    clean = df.loc[:, columns].copy()
+    if config.label_end_col:
+        if df.index.tz is None:
+            raise ValueError('event-time purging requires a timezone-aware decision index')
+        ends = pd.to_datetime(clean[config.label_end_col], errors='coerce', utc=True)
+        if ends.isna().any() or (ends < clean.index).any() or clean[config.session_col].isna().any():
+            raise ValueError('purge metadata must contain valid label-end clocks and sessions')
+        clean[config.label_end_col] = ends
     clean = clean.replace([np.inf, -np.inf], np.nan).dropna()
     if len(clean) < 30:
         raise ValueError("at least 30 complete chronological observations are required")
     if clean[config.target_col].nunique() < 2:
         raise ValueError("target must contain at least two classes")
     return clean
+
+
+def _purge_before(fit: pd.DataFrame, evaluate: pd.DataFrame, config: ResearchConfig) -> pd.DataFrame:
+    if not config.label_end_col:
+        return fit
+    return fit.loc[(fit[config.label_end_col] < evaluate.index[0]) & ~fit[config.session_col].isin(evaluate[config.session_col])].copy()
 
 
 def chronological_split(df: pd.DataFrame, config: ResearchConfig) -> ChronologicalSplit:
@@ -131,11 +157,16 @@ def chronological_split(df: pd.DataFrame, config: ResearchConfig) -> Chronologic
     cal_end = train_end + int(np.floor(n * config.calibration_fraction))
     if train_end < 10 or cal_end <= train_end or cal_end >= n:
         raise ValueError("split leaves an unusable train/calibration/test partition")
-    return ChronologicalSplit(
-        train=clean.iloc[:train_end].copy(),
-        calibration=clean.iloc[train_end:cal_end].copy(),
-        test=clean.iloc[cal_end:].copy(),
-    )
+    train = clean.iloc[:train_end].copy()
+    calibration = clean.iloc[train_end:cal_end].copy()
+    test = clean.iloc[cal_end:].copy()
+    # Purge train against the original calibration boundary, then calibration
+    # against test. Long training labels must also end before the test boundary.
+    train = _purge_before(_purge_before(train, calibration, config), test, config)
+    calibration = _purge_before(calibration, test, config)
+    if len(train) < 10 or calibration.empty:
+        raise ValueError('insufficient train/calibration rows after event and session purging')
+    return ChronologicalSplit(train=train, calibration=calibration, test=test)
 
 
 def _strip_json(text: str) -> str:
@@ -271,6 +302,7 @@ def inner_walk_forward_score(spec: HypothesisSpec, train: pd.DataFrame, config: 
     for window in windows:
         fit = train.iloc[window.train_start:window.train_end]
         evaluate = train.iloc[window.test_start:window.test_end]
+        fit = _purge_before(fit, evaluate, config)
         if fit[config.target_col].nunique() < 2:
             continue
         if set(evaluate[config.target_col]) - set(fit[config.target_col]):
@@ -398,6 +430,9 @@ def run_ai_research(df: pd.DataFrame, config: ResearchConfig, client: Any | None
 
     return {
         "research_protocol": "TRAIN_INNER_WALK_FORWARD_GENERATE__CALIBRATE_SELECT__TEST_ONCE",
+        "label_overlap_purging_verified": bool(config.label_end_col),
+        "live_trading_eligible": False,
+        "dependence_embargo_calibrated": False,
         "instrument": config.instrument,
         "asset_type": config.asset_type,
         "target": config.target_col,
